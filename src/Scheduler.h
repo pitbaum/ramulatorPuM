@@ -71,7 +71,7 @@ public:
 
     enum class Type {
         FCFS, FRFCFS, FRFCFS_Cap, FRFCFS_PriorHit, MAX
-    } type = Type::FRFCFS_Cap; //Change this line to change scheduling policy
+    } type = Type::FRFCFS; //Change this line to change scheduling policy
 
     long cap = 16; //Change this line to change cap
 

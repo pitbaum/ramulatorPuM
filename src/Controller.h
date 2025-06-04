@@ -83,12 +83,18 @@ public:
 
     Queue readq;  // queue for read requests
     Queue writeq;  // queue for write requests
-    Queue actq; // read and write requests for which activate was issued are moved to 
+    Queue actq; // read, write and PuM requests for which activate was issued are moved to 
                    // actq, which has higher priority than readq and writeq.
                    // This is an optimization
                    // for avoiding useless activations (i.e., PRECHARGE
                    // after ACTIVATE w/o READ of WRITE command)
     Queue otherq;  // queue for all "other" requests (e.g., refresh)
+    Queue rowcloneq; // queue for row clone requests
+    Queue majq;  // queue for maj requests
+
+    //Make the queue size for the rowclone and the maj operations bigger than 32
+    rowcloneq.max = 128;
+    majq.max = 128;
 
     deque<Request> pending;  // read requests that are about to receive data from DRAM
     bool write_mode = false;  // whether write requests should be prioritized over reads
@@ -306,10 +312,16 @@ public:
         switch (int(type)) {
             case int(Request::Type::READ): return readq;
             case int(Request::Type::WRITE): return writeq;
+            // Add the new command type to its own dedicated queue
+            case int(Request::Type::ROWCLONE): return rowcloneq;
+            case int(Request::Type::MAJX): return majq;
             default: return otherq;
         }
     }
 
+    // No further modifications necessary
+    // Small optimization possible where a read can be issued from a PuM command
+    // Analogue to the read write works to the same address
     bool enqueue(Request& req)
     {
         Queue& queue = get_queue(req.type);
@@ -332,10 +344,17 @@ public:
     void tick()
     {
         clk++;
-        req_queue_length_sum += readq.size() + writeq.size() + pending.size();
+        req_queue_length_sum += readq.size() + writeq.size() + rowcloneq.size() + majq.size() pending.size();
         read_req_queue_length_sum += readq.size() + pending.size();
         write_req_queue_length_sum += writeq.size();
+        rowclone_req_queue_length_sum += rowcloneq.size();
+        maj_req_queue_length_sum += majq.size();
 
+        // Normally know the hierachy will be to first serve shortcut Reads,
+        // then check the read and write queues if we do read or write command issueing
+        // Instead prioritize PuM commands if all 32 packages for a request have arrived
+
+        // Issues shortcut reads
         /*** 1. Serve completed reads ***/
         if (pending.size()) {
             Request& req = pending[0];
@@ -383,6 +402,144 @@ public:
         if (!is_valid_req) {
             queue = !write_mode ? &readq : &writeq;
 
+            /*
+                Do PuM related scheduling that has precedence over the read write stuff
+            */
+
+            // Is the PuM related queue big enough to even consider checking the readiness
+            bool rowclone_buffer_is_big_enough = rowcloneq.size() >= 32;
+            bool maj_buffer_is_big_enough = majq.size() >= 32;
+
+            // Hash for vector<int> (To check for same addresses in a queue)
+            // In reality would need to check for same tag of parent request, but request in ramulator doesnt have such a field
+            struct VectorHash {
+                std::size_t operator()(const std::vector<int>& vec) const {
+                    std::size_t seed = vec.size();
+                    for (int v : vec) {
+                        seed ^= std::hash<int>()(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+                    }
+                    return seed;
+                }
+            };
+
+            // Check if 2 requests have the same addr_vec in a queue
+            bool has_any_group_of_32_same_addr(const Queue& pQueue) {
+                std::unordered_map<std::vector<int>, int, VectorHash> addr_vec_counts;
+                for (const auto& req : pQueue.q) {
+                    ++addr_vec_counts[req.addr_vec];
+                    if (addr_vec_counts[req.addr_vec] >= 32) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // Get first 2 requests with matching addr_vec
+            std::list<Request>::iterator find_common_group_start(Queue& pQueue, std::vector<int>& out_vec) {
+                std::unordered_map<std::vector<int>, int, VectorHash> addr_vec_counts;
+                for (const auto& req : pQueue.q) {
+                    ++addr_vec_counts[req.addr_vec];
+                }
+                for (const auto& [vec, count] : addr_vec_counts) {
+                    if (count >= 32) {
+                        out_vec = vec;
+                        break;
+                    }
+                }
+                if (out_vec.empty()) return pQueue.q.end();
+
+                // Find the first iterator where a group of 2 starts
+                int found = 0;
+                for (auto it = pQueue.q.begin(); it != pQueue.q.end(); ++it) {
+                    if (it->addr_vec == out_vec) {
+                        ++found;
+                        if (found == 1) return it;  // return first match
+                    }
+                }
+                return pQueue.q.end();
+            }
+
+            // Moves first of 2 matching to `otherq` as first, remove the rest from the queue
+            void put_pum_into_queue(Queue& pQueue, std::list<Request>& otherq) {
+                std::vector<int> match_vec;
+                auto it = find_common_group_start(pQueue, match_vec);
+                if (it == pQueue.q.end()) return;
+
+                // Promote first request
+                it->is_first_command = true;
+
+                Request main_req = std::move(*it);
+                it = pQueue.q.erase(it);
+
+                // Remove other 31 with the same addr_vec
+                int removed = 1;
+                for (auto iter = pQueue.q.begin(); iter != pQueue.q.end() && removed < 32; ) {
+                    if (iter->addr_vec == match_vec) {
+                        iter = pQueue.q.erase(iter);
+                        ++removed;
+                    } else {
+                        ++iter;
+                    }
+                }
+
+                // If this is a MAJ request, insert two FRACs before it
+                if (main_req.type == Request::Type::MAJ) {
+                    Request frac1 = main_req;  // Copy addr_vec etc.
+                    Request frac2 = main_req;
+                    Request frac3 = main_req;
+                    Request frac4 = main_req;
+
+                    frac1.type = Request::Type::FRAC;
+                    frac1.is_first_command = true;
+                    frac2.type = Request::Type::FRAC;
+                    frac2.is_first_command = false;
+                    frac3.type = Request::Type::FRAC;
+                    frac3.is_first_command = false;
+                    frac4.type = Request::Type::FRAC;
+                    frac4.is_first_command = false;
+
+                    otherq.push_back(std::move(frac1));
+                    otherq.push_back(std::move(frac2));
+                    otherq.push_back(std::move(frac3));
+                    otherq.push_back(std::move(frac4));
+                }
+
+                otherq.push_back(std::move(main_req));
+            }
+
+
+            // Conditionals when and how to check for a ready to promote PuM request
+            if (rowcloneq.size() >= 32 || majq.size() >= 32) {
+                bool is_rowclone_ready = rowcloneq.size() >= 32 && has_any_group_of_32_same_addr(rowcloneq);
+                bool is_maj_ready = majq.size() >= 32 && has_any_group_of_32_same_addr(majq);
+                // If a request in maj and rowclone are both ready
+                // Put them in order of arrival into the otherq 
+                if (is_rowclone_ready && is_maj_ready) {
+                    auto rowclone_head = rowcloneq.q.front();
+                    auto maj_head = majq.q.front();
+                    if (rowclone_head.arrive < maj_head.arrive) {
+                        put_pum_into_queue(rowcloneq, otherq);
+                        // Put 2 x 2 frac commands into the otherq in front of the maj
+                        put_pum_into_queue(majq, otherq);
+                    } else {
+                        // Put two frac commands into the otherq in front of the maj
+                        put_pum_into_queue(majq, otherq);
+                        put_pum_into_queue(rowcloneq, otherq);
+                    }
+                } else if (is_rowclone_ready) {
+                    put_pum_into_queue(rowcloneq, otherq);
+                } else if (is_maj_ready) {
+
+                    // Put two frac commands into the otherq in front of the maj
+                    put_pum_into_queue(majq, otherq);
+                } // In case none of them are ready, dont do anything
+            }
+
+            /*
+                Continue operation as usual, if PuM was ready, added it to otherq to be issued with priority
+            */
+
+            // Other requests
             if (otherq.size())
                 queue = &otherq;  // "other" requests are rare, so we give them precedence over reads/writes
 
@@ -406,6 +563,7 @@ public:
             return;  // nothing more to be done this cycle
         }
 
+        // Updates several stats, potential to check if the PuM request was a hit eventough hits are not allowed
         if (req->is_first_command) {
             req->is_first_command = false;
             int coreid = req->coreid;

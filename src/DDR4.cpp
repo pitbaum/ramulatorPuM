@@ -29,7 +29,7 @@ map<string, enum DDR4::Speed> DDR4::speed_map = {
 DDR4::DDR4(Org org, Speed speed)
     : org_entry(org_table[int(org)]),
     speed_entry(speed_table[int(speed)]), 
-    read_latency(speed_entry.nCL + speed_entry.nBL)
+    read_latency(speed_entry.nCL + speed_entry.nBL),
 {
     init_speed();
     init_prereq();
@@ -113,7 +113,7 @@ void DDR4::init_speed()
     speed_entry.nXS = XS_TABLE[density][speed];
 }
 
-
+// Translations from high to lowerlevel commands through prerequisits by current state check
 void DDR4::init_prereq()
 {
     // RD
@@ -168,6 +168,45 @@ void DDR4::init_prereq()
             case int(State::SelfRefresh): return Command::SRE;
             default: assert(false);
         }};
+    
+    // RC (Rowclone) | ACT -> PREv -> ACTv
+    // TODO: Case in which some Bank state is already open, and need to PRE first (Maybe in scheduler or controller)
+    prereq[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
+        switch (int(node->state)) {
+            case int(State::Closed): return Command::ACT;
+            case int(State::Opened): return Command::PREv;
+            case int(State::RowcloneState): return Command::ACTv;
+            case int(State::ProcessingEnd): return RC;
+            default: assert(false);
+    }};
+
+    //            2.5ns     backoff 6 cycles in 2.5ns (7 cycles in total)
+    // FRAC | ACT ---> PREf --->
+    // Do Frac first for twice for two cells then
+    // Always do this twice before a MAJ command, the scheduling will be done in the controller    
+    prereq[int(Level::Bank)][int(Command::FRAC)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
+        switch (int(node->state)) {
+            case int(State::Closed): return Command::ACT;
+            case int(State::Opened): return Command::PREf;
+            case int(State::FracState): return FRAC; // Change the timing on this
+            default: assert(false);
+    }};
+
+    // MAJ | ACT -> PREj -> Actv
+    // TODO: Case in which some Bank state is already open, and need to PRE first (Maybe in scheduler or controller)
+    prereq[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
+        switch (int(node->state)) {
+            case int(State::Closed): return Command::ACT;
+            case int(State::Opened): return Command::PREj;
+            case int(State::MajState): return Command::ACTv;
+            case int(State::ProcessingEnd): return MAJ;
+            default: assert(false);
+    }};
+
+    // Use the same as Read and Write commands on Rank level to get to normal operation mode energy states
+    prereq[int(Level::Rank)][int(Command::RC)] = prereq[int(Level::Rank)][int(Command::RD)];
+    prereq[int(Level::Rank)][int(Command::MAJ)] = prereq[int(Level::Rank)][int(Command::RD)];
+    prereq[int(Level::Rank)][int(Command::FRAC)] = prereq[int(Level::Rank)][int(Command::RD)];
 }
 
 // SAUGATA: added row hit check functions to see if the desired location is currently open
@@ -190,6 +229,8 @@ void DDR4::init_rowhit()
 
 void DDR4::init_rowopen()
 {
+    // Maybe reuse this to check if some row is open before issue PuM and then already schedule PRE
+    // Check where and how this is used though 
     // RD
     rowopen[int(Level::Bank)][int(Command::RD)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
         switch (int(node->state)) {
@@ -202,6 +243,7 @@ void DDR4::init_rowopen()
     rowopen[int(Level::Bank)][int(Command::WR)] = rowopen[int(Level::Bank)][int(Command::RD)];
 }
 
+// State change mappings
 void DDR4::init_lambda()
 {
     lambda[int(Level::Bank)][int(Command::ACT)] = [] (DRAM<DDR4>* node, int id) {
@@ -240,9 +282,39 @@ void DDR4::init_lambda()
         node->state = State::SelfRefresh;};
     lambda[int(Level::Rank)][int(Command::SRX)] = [] (DRAM<DDR4>* node, int id) {
         node->state = State::PowerUp;};
+    
+    // State transitions for PuM
+    // getting into Rowclone state with PREv
+    lambda[int(Level::Bank)][int(Command::PREv)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = State::RowcloneState;};
+    // Getting into MAJ state with PREj
+    lambda[int(Level::Bank)][int(Command::PREj)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = State::MajState;};
+    // Getting into FRAC state with PREf
+    lambda[int(Level::Bank)][int(Command::PREf)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = State::FracState;};
+    // Getting into the finished processing state after the 32 rows have been opened
+    lambda[int(Level::Bank)][int(Command::ACTv)] = [] (DRAM<DDR4>* node, int id) {
+    node->state = State::ProcessingEnd;
+
+    // Closing the states and returning the issued command of PuM
+    lambda[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = State::Closed;
+        node->row_state.clear();};
+    lambda[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = State::Closed;
+        node->row_state.clear();};
+    lambda[int(Level::Bank)][int(Command::FRAC)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = State::Closed;
+        node->row_state.clear();};
+
+    // Placeholders for all other commands registered for PuM that dont actually change the state
+    lambda[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, int id) {};
+    lambda[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, int id) {};
+    lambda[int(Level::Bank)][int(Command::FRAC)] = [] (DRAM<DDR4>* node, int id) {};
 }
 
-
+// Timing parameters between commands that are issued
 void DDR4::init_timing()
 {
     SpeedEntry& s = speed_entry;
@@ -260,7 +332,9 @@ void DDR4::init_timing()
     t[int(Command::WR)].push_back({Command::WRA, 1, s.nBL});
     t[int(Command::WRA)].push_back({Command::WR, 1, s.nBL});
     t[int(Command::WRA)].push_back({Command::WRA, 1, s.nBL});
-
+    t[int(Command::MAJ)].push_back({Command::MAJ, 1, nCCDS}); // Time between MAJ commands issued
+    t[int(Command::RC)].push_back({Command::RC, 1, nCCDS}); // time between rowclone commands issued
+    t[int(Command::FRAC)].push_back({Command::FRAC, 1, nCCDS}); // time between Frac commands issued
 
     /*** Rank ***/ 
     t = timing[int(Level::Rank)];
@@ -282,7 +356,55 @@ void DDR4::init_timing()
     t[int(Command::WR)].push_back({Command::RDA, 1, s.nCWL + s.nBL + s.nWTRS});
     t[int(Command::WRA)].push_back({Command::RD, 1, s.nCWL + s.nBL + s.nWTRS});
     t[int(Command::WRA)].push_back({Command::RDA, 1, s.nCWL + s.nBL + s.nWTRS});
+    
+    // Rowclone and MAJ after normal operations
+    // rank level parallelism minimum backoff
+    t[int(Command::RD)].push_back({Command::RC, 1, s.nCCDS});
+    t[int(Command::RD)].push_back({Command::MAJ, 1, s.nCCDS});
+    t[int(Command::RDA)].push_back({Command::RC, 1, s.nCCDS});
+    t[int(Command::RDA)].push_back({Command::MAJ, 1, s.nCCDS});
+    t[int(Command::WR)].push_back({Command::RC, 1, s.nCCDS});
+    t[int(Command::WR)].push_back({Command::MAJ, 1, s.nCCDS});
+    t[int(Command::WRA)].push_back({Command::RC, 1, s.nCCDS});
+    t[int(Command::WRA)].push_back({Command::MAJ, 1, s.nCCDS});
 
+    // Other way around back off
+    t[int(Command::RC)].push_back({Command::RD, 1, s.nCCDS});
+    t[int(Command::RC)].push_back({Command::RDA, 1, s.nCCDS});
+    t[int(Command::MAJ)].push_back({Command::RD, 1, s.nCCDS});
+    t[int(Command::MAJ)].push_back({Command::RDA, 1, s.nCCDS});
+    t[int(Command::RC)].push_back({Command::WR, 1, s.nCCDS});
+    t[int(Command::RC)].push_back({Command::WRA, 1, s.nCCDS});
+    t[int(Command::MAJ)].push_back({Command::WR, 1, s.nCCDS});
+    t[int(Command::MAJ)].push_back({Command::WRA, 1, s.nCCDS});
+    
+    // PuM commands to each other
+    t[int(Command::RC)].push_back({Command::RC, 1, s.nCCDS});
+    t[int(Command::RC)].push_back({Command::MAJ, 1, s.nCCDS});
+    t[int(Command::MAJ)].push_back({Command::RC, 1, s.nCCDS});
+    t[int(Command::MAJ)].push_back({Command::MAJ, 1, s.nCCDS});
+
+
+    // Rowclone and MAJ after normal operations
+    // rank level parallelism minimum backoff
+    t[int(Command::RD)].push_back({Command::FRAC, 1, s.nCCDS});
+    t[int(Command::RDA)].push_back({Command::FRAC, 1, s.nCCDS});
+    t[int(Command::WR)].push_back({Command::FRAC, 1, s.nCCDS});
+    t[int(Command::WRA)].push_back({Command::FRAC, 1, s.nCCDS});
+
+    // Other way around back off
+    t[int(Command::FRAC)].push_back({Command::RD, 1, s.nCCDS}); // Maybe set all these to 0, since we dont need backoff from them
+    t[int(Command::FRAC)].push_back({Command::RDA, 1, s.nCCDS});
+    t[int(Command::FRAC)].push_back({Command::WR, 1, s.nCCDS});
+    t[int(Command::FRAC)].push_back({Command::WRA, 1, s.nCCDS});
+    
+    // PuM commands to each other
+    t[int(Command::FRAC)].push_back({Command::RC, 1, s.nCCDS});
+    t[int(Command::FRAC)].push_back({Command::MAJ, 1, s.nCCDS});
+    t[int(Command::RC)].push_back({Command::FRAC, 1, s.nCCDS});
+    t[int(Command::MAJ)].push_back({Command::FRAC, 1, s.nCCDS});
+    t[int(Command::FRAC)].push_back({Command::FRAC, 1, s.nCCDS});
+    
     // CAS <-> CAS (between sibling ranks)
     t[int(Command::RD)].push_back({Command::RD, 1, s.nBL + s.nRTRS, true});
     t[int(Command::RD)].push_back({Command::RDA, 1, s.nBL + s.nRTRS, true});
@@ -292,17 +414,64 @@ void DDR4::init_timing()
     t[int(Command::RD)].push_back({Command::WRA, 1, s.nBL + s.nRTRS, true});
     t[int(Command::RDA)].push_back({Command::WR, 1, s.nBL + s.nRTRS, true});
     t[int(Command::RDA)].push_back({Command::WRA, 1, s.nBL + s.nRTRS, true});
-    t[int(Command::RD)].push_back({Command::WR, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
-    t[int(Command::RD)].push_back({Command::WRA, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
-    t[int(Command::RDA)].push_back({Command::WR, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
-    t[int(Command::RDA)].push_back({Command::WRA, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WR)].push_back({Command::WR, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WR)].push_back({Command::WRA, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WRA)].push_back({Command::WR, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WRA)].push_back({Command::WRA, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
     t[int(Command::WR)].push_back({Command::RD, 1, s.nCWL + s.nBL + s.nRTRS - s.nCL, true});
     t[int(Command::WR)].push_back({Command::RDA, 1, s.nCWL + s.nBL + s.nRTRS - s.nCL, true});
     t[int(Command::WRA)].push_back({Command::RD, 1, s.nCWL + s.nBL + s.nRTRS - s.nCL, true});
     t[int(Command::WRA)].push_back({Command::RDA, 1, s.nCWL + s.nBL + s.nRTRS - s.nCL, true});
 
+    //nRTRS (Rank-to-Rank Switching Time)
+    //Definition: Minimum delay required when switching between different ranks. for commands that use the data bus (i.e. read/write)
+    //Usage: Ensures proper timing when accessing different ranks to prevent data conflicts.
+    // Use of rank switching time i.e. nRTRS
+    t[int(Command::RD)].push_back({Command::RC, 1, s.nBL + s.nRTRS, true});
+    t[int(Command::RD)].push_back({Command::MAJ, 1, s.nBL + s.nRTRS, true});
+    t[int(Command::RD)].push_back({Command::FRAC, 1, s.nBL + s.nRTRS, true});
+    t[int(Command::RDA)].push_back({Command::RC, 1, s.nBL + s.nRTRS, true});
+    t[int(Command::RDA)].push_back({Command::MAJ, 1, s.nBL + s.nRTRS, true});
+    t[int(Command::RDA)].push_back({Command::FRAC, 1, s.nBL + s.nRTRS, true});
+    t[int(Command::WR)].push_back({Command::RC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WR)].push_back({Command::MAJ, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WR)].push_back({Command::FRAC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WRA)].push_back({Command::RC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WRA)].push_back({Command::MAJ, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WRA)].push_back({Command::FRAC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+
+    // Other way around back off
+    t[int(Command::RC)].push_back({Command::RD, 1, s.nRTRS, true});
+    t[int(Command::RC)].push_back({Command::RDA, 1, s.nRTRS, true});
+    t[int(Command::MAJ)].push_back({Command::RD, 1, s.nRTRS, true});
+    t[int(Command::MAJ)].push_back({Command::RDA, 1,  s.nRTRS, true});
+    t[int(Command::FRAC)].push_back({Command::RD, 1, s.nRTRS, true});
+    t[int(Command::FRAC)].push_back({Command::RDA, 1, s.nRTRS, true});
+    t[int(Command::RC)].push_back({Command::WR, 1,  s.nRTRS, true});
+    t[int(Command::RC)].push_back({Command::WRA, 1,  s.nRTRS, true});
+    t[int(Command::MAJ)].push_back({Command::WR, 1,  s.nRTRS, true});
+    t[int(Command::MAJ)].push_back({Command::WRA, 1,  s.nRTRS, true});
+    t[int(Command::FRAC)].push_back({Command::WR, 1,  s.nRTRS, true});
+    t[int(Command::FRAC)].push_back({Command::WRA, 1,  s.nRTRS, true});
+
+    // PuM commands to each other
+    t[int(Command::RC)].push_back({Command::RC, 1,  s.nRTRS, true});
+    t[int(Command::RC)].push_back({Command::MAJ, 1,  s.nRTRS, true});
+    t[int(Command::RC)].push_back({Command::FRAC, 1,  s.nRTRS, true});
+    t[int(Command::MAJ)].push_back({Command::RC, 1,  s.nRTRS, true});
+    t[int(Command::MAJ)].push_back({Command::FRAC, 1,  s.nRTRS, true});
+    t[int(Command::MAJ)].push_back({Command::MAJ, 1,  s.nRTRS, true});
+    t[int(Command::FRAC)].push_back({Command::RC, 1,  s.nRTRS, true});
+    t[int(Command::FRAC)].push_back({Command::MAJ, 1,  s.nRTRS, true});
+    t[int(Command::FRAC)].push_back({Command::FRAC, 1,  s.nRTRS, true});
+
     t[int(Command::RD)].push_back({Command::PREA, 1, s.nRTP});
     t[int(Command::WR)].push_back({Command::PREA, 1, s.nCWL + s.nBL + s.nWR});
+    
+    // Using the rank to rank switching time again
+    t[int(Command::RC)].push_back({Command::PREA, 1, s.nRTRS});
+    t[int(Command::MAJ)].push_back({Command::PREA, 1, s.nRTRS});
+    t[int(Command::FRAC)].push_back({Command::PREA, 1, s.nRTRS});
 
     // CAS <-> PD
     t[int(Command::RD)].push_back({Command::PDE, 1, s.nCL + s.nBL + 1});
@@ -313,7 +482,16 @@ void DDR4::init_timing()
     t[int(Command::PDX)].push_back({Command::RDA, 1, s.nXP});
     t[int(Command::PDX)].push_back({Command::WR, 1, s.nXP});
     t[int(Command::PDX)].push_back({Command::WRA, 1, s.nXP});
-    
+
+    // PuM to power down timings
+    // Onlz s.nCL since no burst length necessary
+    t[int(Command::MAJ)].push_back({Command::PDE, 1, s.nCL});
+    t[int(Command::RC)].push_back({Command::PDE, 1, s.nCL});
+    t[int(Command::FRAC)].push_back({Command::PDE, 1, s.nCL});
+    t[int(Command::PDX)].push_back({Command::RC, 1, s.nXP});
+    t[int(Command::PDX)].push_back({Command::MAJ, 1, s.nXP});
+    t[int(Command::PDX)].push_back({Command::FRAC, 1, s.nXP});
+   
     // CAS <-> SR: none (all banks have to be precharged)
 
     // RAS <-> RAS
@@ -328,9 +506,12 @@ void DDR4::init_timing()
     t[int(Command::PREA)].push_back({Command::REF, 1, s.nRP});
     t[int(Command::RDA)].push_back({Command::REF, 1, s.nRTP + s.nRP});
     t[int(Command::WRA)].push_back({Command::REF, 1, s.nCWL + s.nBL + s.nWR + s.nRP});
+    // All Pum workloads start with ACT so this also counts for PuM
     t[int(Command::REF)].push_back({Command::ACT, 1, s.nRFC});
+    // Since all PuM requests end in PRE, PREv and PREj methods should not be triggered
 
     // RAS <-> PD
+    // Not necessary, no powerdown during or after PuM commands
     t[int(Command::ACT)].push_back({Command::PDE, 1, 1});
     t[int(Command::PDX)].push_back({Command::ACT, 1, s.nXP});
     t[int(Command::PDX)].push_back({Command::PRE, 1, s.nXP});
@@ -340,6 +521,7 @@ void DDR4::init_timing()
     t[int(Command::PRE)].push_back({Command::SRE, 1, s.nRP});
     t[int(Command::PREA)].push_back({Command::SRE, 1, s.nRP});
     t[int(Command::SRX)].push_back({Command::ACT, 1, s.nXS});
+    // Self refresh should never occur after a PREv or PREj, no refresh during PuM execution
 
     // REF <-> REF
     t[int(Command::REF)].push_back({Command::REF, 1, s.nRFC});
@@ -379,8 +561,53 @@ void DDR4::init_timing()
     t[int(Command::WRA)].push_back({Command::RD, 1, s.nCWL + s.nBL + s.nWTRL});
     t[int(Command::WRA)].push_back({Command::RDA, 1, s.nCWL + s.nBL + s.nWTRL});
 
+    // PuM with itself
+    t[int(Command::RC)].push_back({Command::RC, 1, s.nCCDL});
+    t[int(Command::MAJ)].push_back({Command::MAJ, 1, s.nCCDL});
+    t[int(Command::FRAC)].push_back({Command::FRAC, 1, s.nCCDL});
+    t[int(Command::RC)].push_back({Command::MAJ, 1, s.nCCDL});
+    t[int(Command::MAJ)].push_back({Command::RC, 1, s.nCCDL});
+    t[int(Command::FRAC)].push_back({Command::MAJ, 1, s.nCCDL});
+    t[int(Command::FRAC)].push_back({Command::RC, 1, s.nCCDL});
+    t[int(Command::RC)].push_back({Command::FRAC, 1, s.nCCDL});
+    t[int(Command::MAJ)].push_back({Command::FRAC, 1, s.nCCDL});
+
+
+    // PuM to others
+    t[int(Command::RC)].push_back({Command::RD, 1, s.nCCDL});
+    t[int(Command::RC)].push_back({Command::RDA, 1, s.nCCDL});
+    t[int(Command::MAJ)].push_back({Command::RD, 1, s.nCCDL});
+    t[int(Command::MAJ)].push_back({Command::RDA, 1, s.nCCDL});
+    t[int(Command::FRAC)].push_back({Command::RD, 1, s.nCCDL});
+    t[int(Command::FRAC)].push_back({Command::RDA, 1, s.nCCDL});
+    t[int(Command::RC)].push_back({Command::WR, 1, s.nCCDL});
+    t[int(Command::RC)].push_back({Command::WRA, 1, s.nCCDL});
+    t[int(Command::MAJ)].push_back({Command::WR, 1, s.nCCDL});
+    t[int(Command::MAJ)].push_back({Command::WRA, 1, s.nCCDL});
+    t[int(Command::FRAC)].push_back({Command::WR, 1, s.nCCDL});
+    t[int(Command::FRAC)].push_back({Command::WRA, 1, s.nCCDL});
+    t[int(Command::RD)].push_back({Command::RC, 1, s.nCCDL});
+    t[int(Command::RD)].push_back({Command::MAJ, 1, s.nCCDL});
+    t[int(Command::RD)].push_back({Command::FRAC, 1, s.nCCDL});
+    t[int(Command::RDA)].push_back({Command::RC, 1, s.nCCDL});
+    t[int(Command::RDA)].push_back({Command::MAJ, 1, s.nCCDL});
+    t[int(Command::RDA)].push_back({Command::FRAC, 1, s.nCCDL});
+    t[int(Command::WR)].push_back({Command::RC, 1, s.nCCDL});
+    t[int(Command::WR)].push_back({Command::MAJ, 1, s.nCCDL});
+    t[int(Command::WR)].push_back({Command::FRAC, 1, s.nCCDL});
+    t[int(Command::WRA)].push_back({Command::RC, 1, s.nCCDL});
+    t[int(Command::WRA)].push_back({Command::MAJ, 1, s.nCCDL});
+    t[int(Command::WRA)].push_back({Command::FRAC, 1, s.nCCDL});
+
     // RAS <-> RAS
     t[int(Command::ACT)].push_back({Command::ACT, 1, s.nRRDL});
+    t[int(Command::ACTv)].push_back({Command::ACT, 1, s.nRRDL});
+    // Since all PuM commands are already registered, no ACTv entry here
+    // All PuM commands start with an ACT so no need for the backoff timing
+    // IF we needed here some intra bankgroup backoff, it will limit parallelization
+    // Meaning we might need to switch to DDR3 for flat banks
+    // But in both ramulator 1 and 2 nRRDL is 0 or -1 so not accounted for anyways so maybe not necessary
+    // Only defined in things like HBM etc. but even there it is <= 3 so it doesnt matter since PuM needs 3ns 
 
     /*** Bank ***/ 
     t = timing[int(Level::Bank)];
@@ -401,4 +628,23 @@ void DDR4::init_timing()
     t[int(Command::ACT)].push_back({Command::ACT, 1, s.nRC});
     t[int(Command::ACT)].push_back({Command::PRE, 1, s.nRAS});
     t[int(Command::PRE)].push_back({Command::ACT, 1, s.nRP});
+    
+    // According to the state machine additions 3 new commands are necessary
+    // MAJORITY:   ACT 1.5ns -> PREj 3ns -> ACTv tRP -> MAJ (Back in closed state again)
+    // ROWCLONE:   ACT tRAS -> PREv 3ns -> ACTv tRP-> RC (Back in closed state again)
+    // FRACTIONAL: ACT 2.5ns -> PREf tRP -> FRAC (Back in closed state again)
+
+    // Rowclone command timings
+    t[int(Command::ACT)].push_back({Command::PREv, 1, 3}); // 1.5ns
+    t[int(Command::PREv)].push_back({Command::ACTv, 1, 6}); // 3ns
+    t[int(Command::ACTv)].push_back({Command::RC, 1, s.nRP}); // Check again in MAJ32 paper how to do 32 RC
+
+    // MAJ command timings
+    t[int(Command::ACT)].push_back({Command::PREj, 1, s.nRAS});
+    t[int(Command::PREj)].push_back({Command::ACTv, 1, 6}); // Check APA timing
+    t[int(Command::ACTv)].push_back({Command::MAJ, 1, s.nRP});
+
+    // FRAC command timings
+    t[int(Command::ACT)].push_back({Command::PREf, 1, 5});
+    t[int(Command::PREf)].push_back({Command::FRAC, 1, s.nRP});
 }

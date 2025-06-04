@@ -1,0 +1,19 @@
+{
+    "files.associations": {
+        "bitset": "cpp",
+        "cstdlib": "cpp",
+        "mutex": "cpp",
+        "shared_mutex": "cpp",
+        "*.inc": "cpp",
+        "deque": "cpp",
+        "string": "cpp",
+        "vector": "cpp",
+        "list": "cpp",
+        "unordered_map": "cpp",
+        "unordered_set": "cpp",
+        "array": "cpp",
+        "string_view": "cpp",
+        "random": "cpp",
+        "functional": "cpp"
+    }
+}

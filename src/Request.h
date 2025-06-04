@@ -19,6 +19,7 @@ public:
     // specify which core this request sent from, for virtual address translation
     int coreid;
 
+    // Type of a request that will in the DDR standard be translated by index
     enum class Type
     {
         READ,
@@ -26,7 +27,9 @@ public:
         REFRESH,
         POWERDOWN,
         SELFREFRESH,
-        EXTENSION,
+        ROWCLONE,   // Rowclone
+        MAJX,    // Majority X
+        FRACTIONAL, // Making a neutral row
         MAX
     } type;
 

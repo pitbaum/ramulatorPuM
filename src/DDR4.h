@@ -35,20 +35,23 @@ public:
     { 
         ACT, PRE, PREA, 
         RD,  WR,  RDA,  WRA, 
-        REF, PDE, PDX,  SRE, SRX, 
+        REF, PDE, PDX,  SRE, SRX,
+        RC, MAJ, FRAC, ACTv, PREv, PREj, PREf, 
         MAX
     };
 
     string command_name[int(Command::MAX)] = {
         "ACT", "PRE", "PREA", 
         "RD",  "WR",  "RDA",  "WRA", 
-        "REF", "PDE", "PDX",  "SRE", "SRX"
+        "REF", "PDE", "PDX",  "SRE", "SRX",
+        "RC", "MAJ", "FRAC","ACTv", "PREv", "PREj", "PREf", // Register PuM command names and the news violating low level commands
     };
 
     Level scope[int(Command::MAX)] = {
         Level::Row,    Level::Bank,   Level::Rank,   
         Level::Column, Level::Column, Level::Column, Level::Column,
-        Level::Rank,   Level::Rank,   Level::Rank,   Level::Rank,   Level::Rank
+        Level::Rank,   Level::Rank,   Level::Rank,   Level::Rank,   Level::Rank, 
+        Level::Bank, Level::Bank, Level::Bank, Level::Row, Level::Bank, Level::Bank, Level::Bank, // Add the level of the new commands
     };
 
     bool is_opening(Command cmd) 
@@ -87,6 +90,39 @@ public:
         }
     }
 
+    // From Acting state to rowclone state
+    bool is_starting_rowclone(Command cmd)
+    {
+        switch(int(cmd)) {
+            case int(Command::PREv):
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // From Active state to maj state with PREj
+    bool is_starting_maj(Command cmd)
+    {
+        switch(int(cmd)) {
+            case int(Command::PREj):
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // From rowclone state back to idle
+    bool is_ending_pum(Command cmd)
+    {
+        switch (int(cmd)) {
+        case int(Command::PRE):
+            return true;
+        default:
+            return false;
+        }
+    }
+
     bool is_refreshing(Command cmd) 
     {
         switch(int(cmd)) {
@@ -100,7 +136,7 @@ public:
     /* State */
     enum class State : int
     {
-        Opened, Closed, PowerUp, ActPowerDown, PrePowerDown, SelfRefresh, MAX
+        Opened, Closed, PowerUp, ActPowerDown, PrePowerDown, SelfRefresh, MajState, RowcloneState, ProcessingEnd, FracState, MAX
     } start[int(Level::MAX)] = {
         State::MAX, State::PowerUp, State::MAX, State::Closed, State::Closed, State::MAX
     };
@@ -108,7 +144,8 @@ public:
     /* Translate */
     Command translate[int(Request::Type::MAX)] = {
         Command::RD,  Command::WR,
-        Command::REF, Command::PDE, Command::SRE
+        Command::REF, Command::PDE, Command::SRE,
+        Command::RC, Command::MAJ, Command::FRAC,
     };
 
     /* Prereq */
@@ -161,7 +198,7 @@ public:
         DDR4_1866M, DDR4_1866N,
         DDR4_2133P, DDR4_2133R,
         DDR4_2400R, DDR4_2400U,
-        DDR4_3200,
+        DDR4_3200, DDR4_4000,
         MAX
     };
 
@@ -177,6 +214,8 @@ public:
     int channel_width = 64;
 
     struct SpeedEntry {
+        // For PuM timing definitions look in the DDR4.cpp
+        // PuM timings are alwazs required to be the same, so statically inside the init_timings() of DDR4
         int rate;
         double freq, tCK;
         int nBL, nCCDS, nCCDL, nRTRS;
@@ -186,7 +225,7 @@ public:
         int nRRDS, nRRDL, nFAW;
         int nRFC, nREFI;
         int nPD, nXP, nXPDLL; // XPDLL not found in DDR4??
-        int nCKESR, nXS, nXSDLL; // nXSDLL TBD (nDLLK), nXS = (tRFC+10ns)/tCK
+        int nCKESR, nXS, nXSDLL; // nXSDLL TBD (nDLLK), nXS = (tRFC+10ns)/tCK 
     } speed_table[int(Speed::MAX)] = {
         {1600, (400.0/3)*6, (3/0.4)/6, 4, 4, 5, 2, 11, 11, 11,  9, 28, 39, 6, 2, 6, 12, 0, 0, 0, 0, 0, 4, 5, 0, 5, 0, 0},
         {1600, (400.0/3)*6, (3/0.4)/6, 4, 4, 5, 2, 12, 12, 12,  9, 28, 40, 6, 2, 6, 12, 0, 0, 0, 0, 0, 4, 5, 0, 5, 0, 0},
@@ -197,10 +236,40 @@ public:
         {2400, (400.0/3)*9, (3/0.4)/9, 4, 4, 6, 2, 16, 16, 16, 12, 39, 55, 9, 3, 9, 18, 0, 0, 0, 0, 0, 6, 8, 0, 7, 0, 0},
         {2400, (400.0/3)*9, (3/0.4)/9, 4, 4, 6, 2, 18, 18, 18, 12, 39, 57, 9, 3, 9, 18, 0, 0, 0, 0, 0, 6, 8, 0, 7, 0, 0},
         {3200, 1600, 0.625, prefetch_size/2/*DDR*/, 4,     10,   2,    22, 22,  22, 16,  56,  78, 12,  4,    12,   24, 8,    10,   40,  0,   0,    8,  10, 0,     8,     0,  0}
-        //rate, freq, tCK,  nBL,           nCCDS  nCCDL nRTRS nCL nRCD nRP nCWL nRAS nRC nRTP nWTRS nWTRL nWR nRRDS nRRDL nFAW nRFC nREFI nPD nXP nXPDLL nCKESR nXS nXSDLL
+        {
+            4000, 2000, 0.5,    // rate (MT/s), freq (MHz), tCK (ns)
+            4,     // tBL     = Burst Length (4)
+            4,     // tCCD_S  = CAS-to-CAS Delay (same bank group)
+            10,    // tCCD_L  = CAS-to-CAS Delay (diff bank group)
+            2,     // tRTRS   = Rank-to-Rank Switching Time
+            16,    // tCL     = CAS Latency
+            21,    // tRCD    = Row to Column Delay
+            18,    // tRP     = Row Precharge Time
+            16,    // tCWL    = CAS Write Latency
+            40,    // tRAS    = Row Active Time
+            62,    // tRC     = Row Cycle Time (tRAS + tRP)
+            12,    // tRTP    = Read to Precharge
+            5,     // tWTR_S  = Write to Read (same bank group)
+            13,    // tWTR_L  = Write to Read (diff bank group)
+            24,    // tWR     = Write Recovery
+            5,    // tRRD_S  = Activate to Activate (same bank group)
+            7,    // tRRD_L  = Activate to Activate (diff bank group)
+            20,    // tFAW    = Four Activate Window
+            0,     // tRFC    = Refresh Cycle Time (TBD)
+            0,     // tREFI   = Refresh Interval (TBD)
+            9,     // tPD     = Power-Down Exit
+            12,    // tXP     = Exit Power-Down to valid command
+            0,     // tXPDLL  = Exit DLL power-down (not always applicable)
+            9,     // tCKESR  = CKE Minimum Pulse Width for Self-Refresh
+            0,     // tXS     = Exit Self-Refresh (≈ tRFC + 10ns)/tCK
+            0      // tXSDLL  = Exit Self-Refresh DLL Lock Time
+        },
     }, speed_entry;
 
     int read_latency;
+    //int rowclone_latency;
+    //int maj_latency;
+    //int frac_latency;
 
 private:
     void init_speed();
