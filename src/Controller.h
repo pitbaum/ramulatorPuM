@@ -1,6 +1,8 @@
 #ifndef __CONTROLLER_H
 #define __CONTROLLER_H
 
+#include <unordered_map>
+
 #include <cassert>
 #include <cstdio>
 #include <deque>
@@ -19,6 +21,7 @@
 #include "ALDRAM.h"
 #include "SALP.h"
 #include "TLDRAM.h"
+#include "DDR4.h"
 
 using namespace std;
 
@@ -55,6 +58,15 @@ protected:
     ScalarStat read_req_queue_length_sum;
     ScalarStat write_req_queue_length_avg;
     ScalarStat write_req_queue_length_sum;
+    ScalarStat rc_req_queue_length_avg;
+    ScalarStat rc_req_queue_length_sum;
+    ScalarStat maj_req_queue_length_avg;
+    ScalarStat maj_req_queue_length_sum;
+
+    ScalarStat rc_commands;
+    ScalarStat maj_commands;
+    ScalarStat frac_commands;
+    
 
 #ifndef INTEGRATED_WITH_GEM5
     VectorStat record_read_hits;
@@ -77,7 +89,7 @@ public:
 
     struct Queue {
         list<Request> q;
-        unsigned int max = 32;
+        unsigned int max = 128; //originally was at 32
         unsigned int size() {return q.size();}
     };
 
@@ -91,10 +103,6 @@ public:
     Queue otherq;  // queue for all "other" requests (e.g., refresh)
     Queue rowcloneq; // queue for row clone requests
     Queue majq;  // queue for maj requests
-
-    //Make the queue size for the rowclone and the maj operations bigger than 32
-    rowcloneq.max = 128;
-    majq.max = 128;
 
     deque<Request> pending;  // read requests that are about to receive data from DRAM
     bool write_mode = false;  // whether write requests should be prioritized over reads
@@ -247,6 +255,8 @@ public:
             .precision(6)
             ;
 
+        
+
 #ifndef INTEGRATED_WITH_GEM5
         record_read_hits
             .init(configs.get_core_num())
@@ -284,6 +294,18 @@ public:
             .desc("record write conflict for this core when it reaches request limit or to the end")
             ;
 #endif
+        rc_commands
+            .name("rc_commands_channel_" + to_string(channel->id))
+            .desc("Number of RC (RowClone) commands issued per channel")
+            .precision(0);
+        maj_commands
+            .name("maj_commands_channel_" + to_string(channel->id))
+            .desc("Number of MAJ (Majority) commands issued per channel")
+            .precision(0);
+        frac_commands
+            .name("frac_commands_channel_" + to_string(channel->id))
+            .desc("Number of FRAC (Fractional) commands issued per channel")
+            .precision(0);
     }
 
     ~Controller(){
@@ -313,8 +335,8 @@ public:
             case int(Request::Type::READ): return readq;
             case int(Request::Type::WRITE): return writeq;
             // Add the new command type to its own dedicated queue
-            case int(Request::Type::ROWCLONE): return rowcloneq;
-            case int(Request::Type::MAJX): return majq;
+            case int(Request::Type::RC): return rowcloneq;
+            case int(Request::Type::MAJ): return majq;
             default: return otherq;
         }
     }
@@ -344,10 +366,11 @@ public:
     void tick()
     {
         clk++;
-        req_queue_length_sum += readq.size() + writeq.size() + rowcloneq.size() + majq.size() pending.size();
+        // shouldnt it be = rather than += ???
+        req_queue_length_sum += readq.size() + writeq.size() + rowcloneq.size() + majq.size() + pending.size();
         read_req_queue_length_sum += readq.size() + pending.size();
         write_req_queue_length_sum += writeq.size();
-        rowclone_req_queue_length_sum += rowcloneq.size();
+        rc_req_queue_length_sum += rowcloneq.size();
         maj_req_queue_length_sum += majq.size();
 
         // Normally know the hierachy will be to first serve shortcut Reads,
@@ -406,108 +429,6 @@ public:
                 Do PuM related scheduling that has precedence over the read write stuff
             */
 
-            // Is the PuM related queue big enough to even consider checking the readiness
-            bool rowclone_buffer_is_big_enough = rowcloneq.size() >= 32;
-            bool maj_buffer_is_big_enough = majq.size() >= 32;
-
-            // Hash for vector<int> (To check for same addresses in a queue)
-            // In reality would need to check for same tag of parent request, but request in ramulator doesnt have such a field
-            struct VectorHash {
-                std::size_t operator()(const std::vector<int>& vec) const {
-                    std::size_t seed = vec.size();
-                    for (int v : vec) {
-                        seed ^= std::hash<int>()(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-                    }
-                    return seed;
-                }
-            };
-
-            // Check if 2 requests have the same addr_vec in a queue
-            bool has_any_group_of_32_same_addr(const Queue& pQueue) {
-                std::unordered_map<std::vector<int>, int, VectorHash> addr_vec_counts;
-                for (const auto& req : pQueue.q) {
-                    ++addr_vec_counts[req.addr_vec];
-                    if (addr_vec_counts[req.addr_vec] >= 32) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-
-            // Get first 2 requests with matching addr_vec
-            std::list<Request>::iterator find_common_group_start(Queue& pQueue, std::vector<int>& out_vec) {
-                std::unordered_map<std::vector<int>, int, VectorHash> addr_vec_counts;
-                for (const auto& req : pQueue.q) {
-                    ++addr_vec_counts[req.addr_vec];
-                }
-                for (const auto& [vec, count] : addr_vec_counts) {
-                    if (count >= 32) {
-                        out_vec = vec;
-                        break;
-                    }
-                }
-                if (out_vec.empty()) return pQueue.q.end();
-
-                // Find the first iterator where a group of 2 starts
-                int found = 0;
-                for (auto it = pQueue.q.begin(); it != pQueue.q.end(); ++it) {
-                    if (it->addr_vec == out_vec) {
-                        ++found;
-                        if (found == 1) return it;  // return first match
-                    }
-                }
-                return pQueue.q.end();
-            }
-
-            // Moves first of 2 matching to `otherq` as first, remove the rest from the queue
-            void put_pum_into_queue(Queue& pQueue, std::list<Request>& otherq) {
-                std::vector<int> match_vec;
-                auto it = find_common_group_start(pQueue, match_vec);
-                if (it == pQueue.q.end()) return;
-
-                // Promote first request
-                it->is_first_command = true;
-
-                Request main_req = std::move(*it);
-                it = pQueue.q.erase(it);
-
-                // Remove other 31 with the same addr_vec
-                int removed = 1;
-                for (auto iter = pQueue.q.begin(); iter != pQueue.q.end() && removed < 32; ) {
-                    if (iter->addr_vec == match_vec) {
-                        iter = pQueue.q.erase(iter);
-                        ++removed;
-                    } else {
-                        ++iter;
-                    }
-                }
-
-                // If this is a MAJ request, insert two FRACs before it
-                if (main_req.type == Request::Type::MAJ) {
-                    Request frac1 = main_req;  // Copy addr_vec etc.
-                    Request frac2 = main_req;
-                    Request frac3 = main_req;
-                    Request frac4 = main_req;
-
-                    frac1.type = Request::Type::FRAC;
-                    frac1.is_first_command = true;
-                    frac2.type = Request::Type::FRAC;
-                    frac2.is_first_command = false;
-                    frac3.type = Request::Type::FRAC;
-                    frac3.is_first_command = false;
-                    frac4.type = Request::Type::FRAC;
-                    frac4.is_first_command = false;
-
-                    otherq.push_back(std::move(frac1));
-                    otherq.push_back(std::move(frac2));
-                    otherq.push_back(std::move(frac3));
-                    otherq.push_back(std::move(frac4));
-                }
-
-                otherq.push_back(std::move(main_req));
-            }
-
-
             // Conditionals when and how to check for a ready to promote PuM request
             if (rowcloneq.size() >= 32 || majq.size() >= 32) {
                 bool is_rowclone_ready = rowcloneq.size() >= 32 && has_any_group_of_32_same_addr(rowcloneq);
@@ -518,20 +439,20 @@ public:
                     auto rowclone_head = rowcloneq.q.front();
                     auto maj_head = majq.q.front();
                     if (rowclone_head.arrive < maj_head.arrive) {
-                        put_pum_into_queue(rowcloneq, otherq);
+                        put_pum_into_queue(rowcloneq, otherq.q);
                         // Put 2 x 2 frac commands into the otherq in front of the maj
-                        put_pum_into_queue(majq, otherq);
+                        put_pum_into_queue(majq, otherq.q);
                     } else {
                         // Put two frac commands into the otherq in front of the maj
-                        put_pum_into_queue(majq, otherq);
-                        put_pum_into_queue(rowcloneq, otherq);
+                        put_pum_into_queue(majq, otherq.q);
+                        put_pum_into_queue(rowcloneq, otherq.q);
                     }
                 } else if (is_rowclone_ready) {
-                    put_pum_into_queue(rowcloneq, otherq);
+                    put_pum_into_queue(rowcloneq, otherq.q);
                 } else if (is_maj_ready) {
 
                     // Put two frac commands into the otherq in front of the maj
-                    put_pum_into_queue(majq, otherq);
+                    put_pum_into_queue(majq, otherq.q);
                 } // In case none of them are ready, dont do anything
             }
 
@@ -702,6 +623,104 @@ private:
         typename T::Command cmd = channel->spec->translate[int(req->type)];
         return channel->decode(cmd, req->addr_vec.data());
     }
+
+    // Hash for vector<int> (To check for same addresses in a queue)
+    // In reality would need to check for same tag of parent request, but request in ramulator doesnt have such a field
+    struct VectorHash {
+        std::size_t operator()(const std::vector<int>& vec) const {
+            std::size_t seed = vec.size();
+            for (int v : vec) {
+                seed ^= std::hash<int>()(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            }
+            return seed;
+        }
+    };
+
+    // Check if 32 requests have the same addr_vec in a queue
+    bool has_any_group_of_32_same_addr(const Queue& pQueue) {
+        std::unordered_map<std::vector<int>, int, VectorHash> addr_vec_counts;
+        for (const auto& req : pQueue.q) {
+            ++addr_vec_counts[req.addr_vec];
+            if (addr_vec_counts[req.addr_vec] >= 32) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Get first 32 requests with matching addr_vec
+    std::list<Request>::iterator find_common_group_start(Queue& pQueue, std::vector<int>& out_vec) {
+        std::unordered_map<std::vector<int>, int, VectorHash> addr_vec_counts;
+        for (const auto& req : pQueue.q) {
+            ++addr_vec_counts[req.addr_vec];
+        }
+        for (const auto& [vec, count] : addr_vec_counts) {
+            if (count >= 32) {
+                out_vec = vec;
+                break;
+            }
+        }
+        if (out_vec.empty()) return pQueue.q.end();
+
+        // Find the first iterator where a group of 32 starts
+        int found = 0;
+        for (auto it = pQueue.q.begin(); it != pQueue.q.end(); ++it) {
+            if (it->addr_vec == out_vec) {
+                ++found;
+                if (found == 1) return it;  // return first match
+            }
+        }
+        return pQueue.q.end();
+    }
+
+            // Moves first matching to `otherq` as first, remove the rest from the queue
+    void put_pum_into_queue(Queue& pQueue, std::list<Request>& otherq) {
+        std::vector<int> match_vec;
+        auto it = find_common_group_start(pQueue, match_vec);
+        if (it == pQueue.q.end()) return;
+
+        // Promote first request
+        it->is_first_command = true;
+
+        Request main_req = std::move(*it);
+        it = pQueue.q.erase(it);
+
+        // Remove other 31 with the same addr_vec
+        int removed = 1;
+        for (auto iter = pQueue.q.begin(); iter != pQueue.q.end() && removed < 32; ) {
+            if (iter->addr_vec == match_vec) {
+                iter = pQueue.q.erase(iter);
+                ++removed;
+            } else {
+                ++iter;
+            }
+        }
+
+        // If this is a MAJ request, insert 4 FRACs before it
+        if (main_req.type == Request::Type::MAJ) {
+            Request frac1 = std::move(main_req);  // Move main_req to frac1
+            Request frac2 = frac1; // Copy frac1 (should be safe if callback is moved only once)
+            Request frac3 = frac1;
+            Request frac4 = frac1;
+
+            frac1.type = Request::Type::FRAC;
+            frac1.is_first_command = true;
+            frac2.type = Request::Type::FRAC;
+            frac2.is_first_command = false;
+            frac3.type = Request::Type::FRAC;
+            frac3.is_first_command = false;
+            frac4.type = Request::Type::FRAC;
+            frac4.is_first_command = false;
+
+            otherq.push_back(std::move(frac1));
+            otherq.push_back(std::move(frac2));
+            otherq.push_back(std::move(frac3));
+            otherq.push_back(std::move(frac4));
+        }
+
+        otherq.push_back(std::move(main_req));
+    }
+
 
     // upgrade to an autoprecharge command
     void cmd_issue_autoprecharge(typename T::Command& cmd,

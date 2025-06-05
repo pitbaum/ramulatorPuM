@@ -456,7 +456,7 @@ bool Trace::get_dramtrace_request(long& req_addr, Request::Type& req_type)
 {
     string line;
     getline(file, line);
-    if (file.eof()) {
+    if (file.eof() || line.empty()) {
         return false;
     }
     size_t pos;
@@ -464,10 +464,22 @@ bool Trace::get_dramtrace_request(long& req_addr, Request::Type& req_type)
 
     pos = line.find_first_not_of(' ', pos+1);
 
-    if (pos == string::npos || line.substr(pos)[0] == 'R')
-        req_type = Request::Type::READ;
-    else if (line.substr(pos)[0] == 'W')
-        req_type = Request::Type::WRITE;
-    else assert(false);
+    if (pos == string::npos || line.substr(pos).empty())
+        req_type = Request::Type::READ; // Default/fallback
+    else {
+        char c = line.substr(pos)[0];
+        if (c == 'R')
+            req_type = Request::Type::READ;
+        else if (c == 'W')
+            req_type = Request::Type::WRITE;
+        else if (c == 'M')
+            req_type = Request::Type::MAJ;
+        else if (c == 'F')
+            req_type = Request::Type::FRAC;
+        else if (c == 'C')
+            req_type = Request::Type::RC;
+        else
+            assert(false && "Unknown command in DRAM trace");
+    }
     return true;
 }

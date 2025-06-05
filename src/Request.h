@@ -27,9 +27,10 @@ public:
         REFRESH,
         POWERDOWN,
         SELFREFRESH,
-        ROWCLONE,   // Rowclone
-        MAJX,    // Majority X
-        FRACTIONAL, // Making a neutral row
+        RC,   // Rowclone
+        MAJ,    // Majority X
+        FRAC, // Making a neutral row
+        EXTENSION,
         MAX
     } type;
 

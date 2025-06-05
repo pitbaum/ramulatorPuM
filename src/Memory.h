@@ -281,6 +281,7 @@ public:
     void tick()
     {
         ++num_dram_cycles;
+        // Add stats
         int cur_que_req_num = 0;
         int cur_que_readreq_num = 0;
         int cur_que_writereq_num = 0;

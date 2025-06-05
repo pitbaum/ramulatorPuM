@@ -28,8 +28,8 @@ map<string, enum DDR4::Speed> DDR4::speed_map = {
 
 DDR4::DDR4(Org org, Speed speed)
     : org_entry(org_table[int(org)]),
-    speed_entry(speed_table[int(speed)]), 
-    read_latency(speed_entry.nCL + speed_entry.nBL),
+      speed_entry(speed_table[int(speed)]), 
+      read_latency(speed_entry.nCL + speed_entry.nBL)
 {
     init_speed();
     init_prereq();
@@ -139,6 +139,11 @@ void DDR4::init_prereq()
     prereq[int(Level::Rank)][int(Command::WR)] = prereq[int(Level::Rank)][int(Command::RD)];
     prereq[int(Level::Bank)][int(Command::WR)] = prereq[int(Level::Bank)][int(Command::RD)];
 
+    // Add rank level power prerequisits same as for RD to the PuM pre requisits
+    prereq[int(Level::Rank)][int(Command::MAJ)] = prereq[int(Level::Rank)][int(Command::RD)];
+    prereq[int(Level::Rank)][int(Command::RC)] = prereq[int(Level::Rank)][int(Command::RD)];
+    prereq[int(Level::Rank)][int(Command::FRAC)] = prereq[int(Level::Rank)][int(Command::RD)];
+
     // REF
     prereq[int(Level::Rank)][int(Command::REF)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
         for (auto bg : node->children)
@@ -171,35 +176,35 @@ void DDR4::init_prereq()
     
     // RC (Rowclone) | ACT -> PREv -> ACTv
     // TODO: Case in which some Bank state is already open, and need to PRE first (Maybe in scheduler or controller)
-    prereq[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
-        switch (int(node->state)) {
-            case int(State::Closed): return Command::ACT;
-            case int(State::Opened): return Command::PREv;
-            case int(State::RowcloneState): return Command::ACTv;
-            case int(State::ProcessingEnd): return RC;
-            default: assert(false);
+    prereq[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, Command cmd, int id) -> DDR4::Command {
+    switch (int(node->state)) {
+        case int(State::Closed): return DDR4::Command::ACT;
+        case int(State::Opened): return DDR4::Command::PREv;
+        case int(State::RowcloneState): return DDR4::Command::ACTv;
+        case int(State::ProcessingEnd): return DDR4::Command::RC;
+        default: assert(false);
     }};
 
     //            2.5ns     backoff 6 cycles in 2.5ns (7 cycles in total)
     // FRAC | ACT ---> PREf --->
     // Do Frac first for twice for two cells then
     // Always do this twice before a MAJ command, the scheduling will be done in the controller    
-    prereq[int(Level::Bank)][int(Command::FRAC)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
+    prereq[int(Level::Bank)][int(Command::FRAC)] = [] (DRAM<DDR4>* node, Command cmd, int id) -> DDR4::Command {
         switch (int(node->state)) {
-            case int(State::Closed): return Command::ACT;
-            case int(State::Opened): return Command::PREf;
-            case int(State::FracState): return FRAC; // Change the timing on this
+            case int(State::Closed): return DDR4::Command::ACT;
+            case int(State::Opened): return DDR4::Command::PREf;
+            case int(State::FracState): return DDR4::Command::FRAC; // Change the timing on this
             default: assert(false);
     }};
 
     // MAJ | ACT -> PREj -> Actv
     // TODO: Case in which some Bank state is already open, and need to PRE first (Maybe in scheduler or controller)
-    prereq[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
+    prereq[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, Command cmd, int id) -> DDR4::Command {
         switch (int(node->state)) {
-            case int(State::Closed): return Command::ACT;
-            case int(State::Opened): return Command::PREj;
-            case int(State::MajState): return Command::ACTv;
-            case int(State::ProcessingEnd): return MAJ;
+            case int(State::Closed): return DDR4::Command::ACT;
+            case int(State::Opened): return DDR4::Command::PREj;
+            case int(State::MajState): return DDR4::Command::ACTv;
+            case int(State::ProcessingEnd): return DDR4::Command::MAJ;
             default: assert(false);
     }};
 
@@ -295,23 +300,18 @@ void DDR4::init_lambda()
         node->state = State::FracState;};
     // Getting into the finished processing state after the 32 rows have been opened
     lambda[int(Level::Bank)][int(Command::ACTv)] = [] (DRAM<DDR4>* node, int id) {
-    node->state = State::ProcessingEnd;
+        node->state = State::ProcessingEnd;};
 
     // Closing the states and returning the issued command of PuM
-    lambda[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, int id) {
-        node->state = State::Closed;
+    lambda[int(DDR4::Level::Bank)][int(DDR4::Command::RC)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = DDR4::State::Closed;
         node->row_state.clear();};
-    lambda[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, int id) {
-        node->state = State::Closed;
+    lambda[int(DDR4::Level::Bank)][int(DDR4::Command::MAJ)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = DDR4::State::Closed;
         node->row_state.clear();};
-    lambda[int(Level::Bank)][int(Command::FRAC)] = [] (DRAM<DDR4>* node, int id) {
-        node->state = State::Closed;
+    lambda[int(DDR4::Level::Bank)][int(DDR4::Command::FRAC)] = [] (DRAM<DDR4>* node, int id) {
+        node->state = DDR4::State::Closed;
         node->row_state.clear();};
-
-    // Placeholders for all other commands registered for PuM that dont actually change the state
-    lambda[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, int id) {};
-    lambda[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, int id) {};
-    lambda[int(Level::Bank)][int(Command::FRAC)] = [] (DRAM<DDR4>* node, int id) {};
 }
 
 // Timing parameters between commands that are issued
@@ -332,9 +332,9 @@ void DDR4::init_timing()
     t[int(Command::WR)].push_back({Command::WRA, 1, s.nBL});
     t[int(Command::WRA)].push_back({Command::WR, 1, s.nBL});
     t[int(Command::WRA)].push_back({Command::WRA, 1, s.nBL});
-    t[int(Command::MAJ)].push_back({Command::MAJ, 1, nCCDS}); // Time between MAJ commands issued
-    t[int(Command::RC)].push_back({Command::RC, 1, nCCDS}); // time between rowclone commands issued
-    t[int(Command::FRAC)].push_back({Command::FRAC, 1, nCCDS}); // time between Frac commands issued
+    t[int(Command::MAJ)].push_back({Command::MAJ, 1, s.nCCDS}); // Time between MAJ commands issued
+    t[int(Command::RC)].push_back({Command::RC, 1, s.nCCDS}); // time between rowclone commands issued
+    t[int(Command::FRAC)].push_back({Command::FRAC, 1, s.nCCDS}); // time between Frac commands issued
 
     /*** Rank ***/ 
     t = timing[int(Level::Rank)];
