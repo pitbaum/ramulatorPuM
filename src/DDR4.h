@@ -51,7 +51,7 @@ public:
         Level::Row,    Level::Bank,   Level::Rank,   
         Level::Column, Level::Column, Level::Column, Level::Column,
         Level::Rank,   Level::Rank,   Level::Rank,   Level::Rank,   Level::Rank, 
-        Level::Bank, Level::Bank, Level::Bank, Level::Row, Level::Bank, Level::Bank, Level::Bank, // Add the level of the new commands
+        Level::Bank, Level::Bank, Level::Bank, Level::Bank, Level::Bank, Level::Bank, Level::Bank, // Add the level of the new commands
     };
 
     bool is_opening(Command cmd) 
@@ -90,39 +90,6 @@ public:
         }
     }
 
-    // From Acting state to rowclone state
-    bool is_starting_rowclone(Command cmd)
-    {
-        switch(int(cmd)) {
-            case int(Command::PREv):
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    // From Active state to maj state with PREj
-    bool is_starting_maj(Command cmd)
-    {
-        switch(int(cmd)) {
-            case int(Command::PREj):
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    // From rowclone state back to idle
-    bool is_ending_pum(Command cmd)
-    {
-        switch (int(cmd)) {
-        case int(Command::PRE):
-            return true;
-        default:
-            return false;
-        }
-    }
-
     bool is_refreshing(Command cmd) 
     {
         switch(int(cmd)) {
@@ -136,9 +103,9 @@ public:
     /* State */
     enum class State : int
     {
-        Opened, Closed, PowerUp, ActPowerDown, PrePowerDown, SelfRefresh, MajState, RowcloneState, ProcessingEnd, FracState, MAX
-    } start[int(Level::MAX)] = {
-        State::MAX, State::PowerUp, State::MAX, State::Closed, State::Closed, State::MAX
+        Opened, Closed, PowerUp, ActPowerDown, PrePowerDown, SelfRefresh, RowcloneState, FracState, MajState, ProcessingEnd, MAX
+    } start[11] = { // Needed to make this larger, the number level::Max did not even make any sense it should have been the number of states
+        State::MAX, State::PowerUp, State::MAX, State::Closed, State::Closed, State::MAX, State::MAX, State::MAX, State::MAX, State::MAX
     };
 
     /* Translate */
@@ -198,7 +165,7 @@ public:
         DDR4_1866M, DDR4_1866N,
         DDR4_2133P, DDR4_2133R,
         DDR4_2400R, DDR4_2400U,
-        DDR4_3200, DDR4_4000,
+        DDR4_4000,
         MAX
     };
 
@@ -235,7 +202,7 @@ public:
         {2133, (400.0/3)*8, (3/0.4)/8, 4, 4, 6, 2, 16, 16, 16, 11, 36, 52, 8, 3, 8, 16, 0, 0, 0, 0, 0, 6, 7, 0, 7, 0, 0},
         {2400, (400.0/3)*9, (3/0.4)/9, 4, 4, 6, 2, 16, 16, 16, 12, 39, 55, 9, 3, 9, 18, 0, 0, 0, 0, 0, 6, 8, 0, 7, 0, 0},
         {2400, (400.0/3)*9, (3/0.4)/9, 4, 4, 6, 2, 18, 18, 18, 12, 39, 57, 9, 3, 9, 18, 0, 0, 0, 0, 0, 6, 8, 0, 7, 0, 0},
-        {3200, 1600, 0.625, prefetch_size/2/*DDR*/, 4,     10,   2,    22, 22,  22, 16,  56,  78, 12,  4,    12,   24, 8,    10,   40,  0,   0,    8,  10, 0,     8,     0,  0},
+        // There is some issue if i keep 3200 and dont just supstitute it with 4000. Probably not all dependencies are clear to me so just substitute 3200 with my new entry
         {
             4000, 2000, 0.5,    // rate (MT/s), freq (MHz), tCK (ns)
             4,     // tBL     = Burst Length (4)
@@ -263,7 +230,7 @@ public:
             9,     // tCKESR  = CKE Minimum Pulse Width for Self-Refresh
             0,     // tXS     = Exit Self-Refresh (≈ tRFC + 10ns)/tCK
             0      // tXSDLL  = Exit Self-Refresh DLL Lock Time
-        },
+        }
     }, speed_entry;
 
     int read_latency;

@@ -28,7 +28,7 @@ public:
         POWERDOWN,
         SELFREFRESH,
         RC,   // Rowclone
-        MAJ,    // Majority X
+        MAJ,    // Majority 32
         FRAC, // Making a neutral row
         EXTENSION,
         MAX

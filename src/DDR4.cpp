@@ -22,7 +22,7 @@ map<string, enum DDR4::Speed> DDR4::speed_map = {
     {"DDR4_1866M", DDR4::Speed::DDR4_1866M}, {"DDR4_1866N", DDR4::Speed::DDR4_1866N},
     {"DDR4_2133P", DDR4::Speed::DDR4_2133P}, {"DDR4_2133R", DDR4::Speed::DDR4_2133R},
     {"DDR4_2400R", DDR4::Speed::DDR4_2400R}, {"DDR4_2400U", DDR4::Speed::DDR4_2400U},
-    {"DDR4_3200", DDR4::Speed::DDR4_3200},
+    {"DDR4_4000", DDR4::Speed::DDR4_4000} // Added 4000MHz
 };
 
 
@@ -96,7 +96,7 @@ void DDR4::init_speed()
         case 1866: speed = 1; break;
         case 2133: speed = 2; break;
         case 2400: speed = 3; break;
-        case 3200: speed = 4; break;
+        case 4000: speed = 4; break;
         default: assert(false);
     };
     switch (org_entry.size >> 10){
@@ -138,11 +138,6 @@ void DDR4::init_prereq()
     // WR
     prereq[int(Level::Rank)][int(Command::WR)] = prereq[int(Level::Rank)][int(Command::RD)];
     prereq[int(Level::Bank)][int(Command::WR)] = prereq[int(Level::Bank)][int(Command::RD)];
-
-    // Add rank level power prerequisits same as for RD to the PuM pre requisits
-    prereq[int(Level::Rank)][int(Command::MAJ)] = prereq[int(Level::Rank)][int(Command::RD)];
-    prereq[int(Level::Rank)][int(Command::RC)] = prereq[int(Level::Rank)][int(Command::RD)];
-    prereq[int(Level::Rank)][int(Command::FRAC)] = prereq[int(Level::Rank)][int(Command::RD)];
 
     // REF
     prereq[int(Level::Rank)][int(Command::REF)] = [] (DRAM<DDR4>* node, Command cmd, int id) {
@@ -315,6 +310,11 @@ void DDR4::init_lambda()
 }
 
 // Timing parameters between commands that are issued
+// Watch out for all timings are considered when issuing delays, not just immediate related commands
+// For example: (ACT -> FRAC 200ns) (ACTv -> 1ns) (ACT -> ACTv 1ns)
+// IF you issued with this ACT -> ACTv -> FRAC
+// The it will take 1ns -> 1ns -> 199ns finishing at 201 ns
+// Since FRAC needs to be 200ns away from FRAC and 1ns or more away from ACTv 
 void DDR4::init_timing()
 {
     SpeedEntry& s = speed_entry;
@@ -332,9 +332,10 @@ void DDR4::init_timing()
     t[int(Command::WR)].push_back({Command::WRA, 1, s.nBL});
     t[int(Command::WRA)].push_back({Command::WR, 1, s.nBL});
     t[int(Command::WRA)].push_back({Command::WRA, 1, s.nBL});
-    t[int(Command::MAJ)].push_back({Command::MAJ, 1, s.nCCDS}); // Time between MAJ commands issued
-    t[int(Command::RC)].push_back({Command::RC, 1, s.nCCDS}); // time between rowclone commands issued
-    t[int(Command::FRAC)].push_back({Command::FRAC, 1, s.nCCDS}); // time between Frac commands issued
+    // PuM does not need to back off if it doesnt need burst lenght (i.e. doesnt send anything back)
+    //t[int(Command::MAJ)].push_back({Command::MAJ, 1, 0}); // Time between MAJ commands issued
+    //t[int(Command::RC)].push_back({Command::RC, 1, 0}); // time between rowclone commands issued
+    //t[int(Command::FRAC)].push_back({Command::FRAC, 1, 0}); // time between Frac commands issued
 
     /*** Rank ***/ 
     t = timing[int(Level::Rank)];
@@ -429,16 +430,16 @@ void DDR4::init_timing()
     // Use of rank switching time i.e. nRTRS
     t[int(Command::RD)].push_back({Command::RC, 1, s.nBL + s.nRTRS, true});
     t[int(Command::RD)].push_back({Command::MAJ, 1, s.nBL + s.nRTRS, true});
-    t[int(Command::RD)].push_back({Command::FRAC, 1, s.nBL + s.nRTRS, true});
+    t[int(Command::RD)].push_back({Command::FRAC, 1, s.nBL + s.nRTRS, true}); // FRAC does not use the data bus, so not necessary
     t[int(Command::RDA)].push_back({Command::RC, 1, s.nBL + s.nRTRS, true});
     t[int(Command::RDA)].push_back({Command::MAJ, 1, s.nBL + s.nRTRS, true});
     t[int(Command::RDA)].push_back({Command::FRAC, 1, s.nBL + s.nRTRS, true});
     t[int(Command::WR)].push_back({Command::RC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
     t[int(Command::WR)].push_back({Command::MAJ, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
-    t[int(Command::WR)].push_back({Command::FRAC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
-    t[int(Command::WRA)].push_back({Command::RC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
-    t[int(Command::WRA)].push_back({Command::MAJ, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
-    t[int(Command::WRA)].push_back({Command::FRAC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true});
+    t[int(Command::WR)].push_back({Command::FRAC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true}); // FRAC does not use the data bus, so not necessary
+    t[int(Command::WRA)].push_back({Command::RC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true}); // RC does not use the data bus, so not necessary
+    t[int(Command::WRA)].push_back({Command::MAJ, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true}); // MAJ does not use the data  bus, so not neceassary
+    t[int(Command::WRA)].push_back({Command::FRAC, 1, s.nCL + s.nBL + s.nRTRS - s.nCWL, true}); // FRAC does not use the data bus, so not necessary
 
     // Other way around back off
     t[int(Command::RC)].push_back({Command::RD, 1, s.nRTRS, true});
@@ -467,11 +468,6 @@ void DDR4::init_timing()
 
     t[int(Command::RD)].push_back({Command::PREA, 1, s.nRTP});
     t[int(Command::WR)].push_back({Command::PREA, 1, s.nCWL + s.nBL + s.nWR});
-    
-    // Using the rank to rank switching time again
-    t[int(Command::RC)].push_back({Command::PREA, 1, s.nRTRS});
-    t[int(Command::MAJ)].push_back({Command::PREA, 1, s.nRTRS});
-    t[int(Command::FRAC)].push_back({Command::PREA, 1, s.nRTRS});
 
     // CAS <-> PD
     t[int(Command::RD)].push_back({Command::PDE, 1, s.nCL + s.nBL + 1});
@@ -496,7 +492,7 @@ void DDR4::init_timing()
 
     // RAS <-> RAS
     t[int(Command::ACT)].push_back({Command::ACT, 1, s.nRRDS});
-    t[int(Command::ACT)].push_back({Command::ACT, 4, s.nFAW});
+    t[int(Command::ACT)].push_back({Command::ACT, 4, s.nFAW}); // Should not interfere but keep in mind that only 4 can be issued quickly
     t[int(Command::ACT)].push_back({Command::PREA, 1, s.nRAS});
     t[int(Command::PREA)].push_back({Command::ACT, 1, s.nRP});
 
@@ -601,8 +597,6 @@ void DDR4::init_timing()
 
     // RAS <-> RAS
     t[int(Command::ACT)].push_back({Command::ACT, 1, s.nRRDL});
-    t[int(Command::ACTv)].push_back({Command::ACT, 1, s.nRRDL});
-    // Since all PuM commands are already registered, no ACTv entry here
     // All PuM commands start with an ACT so no need for the backoff timing
     // IF we needed here some intra bankgroup backoff, it will limit parallelization
     // Meaning we might need to switch to DDR3 for flat banks
@@ -637,14 +631,15 @@ void DDR4::init_timing()
     // Rowclone command timings
     t[int(Command::ACT)].push_back({Command::PREv, 1, 3}); // 1.5ns
     t[int(Command::PREv)].push_back({Command::ACTv, 1, 6}); // 3ns
-    t[int(Command::ACTv)].push_back({Command::RC, 1, s.nRP}); // Check again in MAJ32 paper how to do 32 RC
+    t[int(Command::ACTv)].push_back({Command::RC, 1, s.nRP}); // Check again in 32 paper how to do 32 RC
 
     // MAJ command timings
     t[int(Command::ACT)].push_back({Command::PREj, 1, s.nRAS});
     t[int(Command::PREj)].push_back({Command::ACTv, 1, 6}); // Check APA timing
     t[int(Command::ACTv)].push_back({Command::MAJ, 1, s.nRP});
 
-    // FRAC command timings
+    // FRAC command timings 
+    // (FRAC -> FRAC: Shows 23ns delay, should be nCCDS)
     t[int(Command::ACT)].push_back({Command::PREf, 1, 5});
     t[int(Command::PREf)].push_back({Command::FRAC, 1, s.nRP});
 }

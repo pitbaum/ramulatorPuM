@@ -695,7 +695,7 @@ private:
                 ++iter;
             }
         }
-
+        /*
         // If this is a MAJ request, insert 4 FRACs before it
         if (main_req.type == Request::Type::MAJ) {
             Request frac1 = std::move(main_req);  // Move main_req to frac1
@@ -717,7 +717,7 @@ private:
             otherq.push_back(std::move(frac3));
             otherq.push_back(std::move(frac4));
         }
-
+        */
         otherq.push_back(std::move(main_req));
     }
 
