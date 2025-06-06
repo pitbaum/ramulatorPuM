@@ -168,7 +168,11 @@ void DDR4::init_prereq()
             case int(State::SelfRefresh): return Command::SRE;
             default: assert(false);
         }};
-    
+ 
+    // ROWCLONE:   ACT tRAS -> PREv 3ns -> ACTv tRP-> RC (Back in closed state again)   
+    // MAJORITY:   ACT 1.5ns -> PREj 3ns -> ACTv tRP -> MAJ (Back in closed state again)
+    // FRACTIONAL: ACT 2.5ns -> PREf tRP -> FRAC (Back in closed state again)
+
     // RC (Rowclone) | ACT -> PREv -> ACTv
     // TODO: Case in which some Bank state is already open, and need to PRE first (Maybe in scheduler or controller)
     prereq[int(Level::Bank)][int(Command::RC)] = [] (DRAM<DDR4>* node, Command cmd, int id) -> DDR4::Command {
@@ -180,6 +184,17 @@ void DDR4::init_prereq()
         default: assert(false);
     }};
 
+    // MAJ | ACT -> PREj -> Actv
+    // TODO: Case in which some Bank state is already open, and need to PRE first (Maybe in scheduler or controller)
+    prereq[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, Command cmd, int id) -> DDR4::Command {
+        switch (int(node->state)) {
+            case int(State::Closed): return DDR4::Command::ACT;
+            case int(State::Opened): return DDR4::Command::PREj;
+            case int(State::MajState): return DDR4::Command::ACTv;
+            case int(State::ProcessingEnd): return DDR4::Command::MAJ;
+            default: assert(false);
+    }};
+
     //            2.5ns     backoff 6 cycles in 2.5ns (7 cycles in total)
     // FRAC | ACT ---> PREf --->
     // Do Frac first for twice for two cells then
@@ -189,17 +204,6 @@ void DDR4::init_prereq()
             case int(State::Closed): return DDR4::Command::ACT;
             case int(State::Opened): return DDR4::Command::PREf;
             case int(State::FracState): return DDR4::Command::FRAC; // Change the timing on this
-            default: assert(false);
-    }};
-
-    // MAJ | ACT -> PREj -> Actv
-    // TODO: Case in which some Bank state is already open, and need to PRE first (Maybe in scheduler or controller)
-    prereq[int(Level::Bank)][int(Command::MAJ)] = [] (DRAM<DDR4>* node, Command cmd, int id) -> DDR4::Command {
-        switch (int(node->state)) {
-            case int(State::Closed): return DDR4::Command::ACT;
-            case int(State::Opened): return DDR4::Command::PREj;
-            case int(State::MajState): return DDR4::Command::ACTv;
-            case int(State::ProcessingEnd): return DDR4::Command::MAJ;
             default: assert(false);
     }};
 
@@ -619,27 +623,27 @@ void DDR4::init_timing()
     t[int(Command::WRA)].push_back({Command::ACT, 1, s.nCWL + s.nBL + s.nWR + s.nRP});
 
     // RAS <-> RAS
-    t[int(Command::ACT)].push_back({Command::ACT, 1, s.nRC});
+    t[int(Command::ACT)].push_back({Command::ACT, 1, s.nRC}); // Causing the issue that PuM wont be issued back to back
     t[int(Command::ACT)].push_back({Command::PRE, 1, s.nRAS});
     t[int(Command::PRE)].push_back({Command::ACT, 1, s.nRP});
     
     // According to the state machine additions 3 new commands are necessary
-    // MAJORITY:   ACT 1.5ns -> PREj 3ns -> ACTv tRP -> MAJ (Back in closed state again)
     // ROWCLONE:   ACT tRAS -> PREv 3ns -> ACTv tRP-> RC (Back in closed state again)
+    // MAJORITY:   ACT 1.5ns -> PREj 3ns -> ACTv tRP -> MAJ (Back in closed state again)
     // FRACTIONAL: ACT 2.5ns -> PREf tRP -> FRAC (Back in closed state again)
 
     // Rowclone command timings
-    t[int(Command::ACT)].push_back({Command::PREv, 1, 3}); // 1.5ns
+    t[int(Command::ACT)].push_back({Command::PREv, 1, s.nRAS});
     t[int(Command::PREv)].push_back({Command::ACTv, 1, 6}); // 3ns
     t[int(Command::ACTv)].push_back({Command::RC, 1, s.nRP}); // Check again in 32 paper how to do 32 RC
 
     // MAJ command timings
-    t[int(Command::ACT)].push_back({Command::PREj, 1, s.nRAS});
+    t[int(Command::ACT)].push_back({Command::PREj, 1, 3});
     t[int(Command::PREj)].push_back({Command::ACTv, 1, 6}); // Check APA timing
     t[int(Command::ACTv)].push_back({Command::MAJ, 1, s.nRP});
 
     // FRAC command timings 
-    // (FRAC -> FRAC: Shows 23ns delay, should be nCCDS)
+    // (FRAC -> ACT: Shows 23ns delay, should be nCCDS)
     t[int(Command::ACT)].push_back({Command::PREf, 1, 5});
     t[int(Command::PREf)].push_back({Command::FRAC, 1, s.nRP});
 }
