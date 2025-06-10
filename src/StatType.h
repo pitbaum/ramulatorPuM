@@ -1,6 +1,8 @@
 #ifndef __STATTYPE_H
 #define __STATTYPE_H
 
+#include <cstdint>
+
 #include <limits>
 #include <fstream>
 #include <string>

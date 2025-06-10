@@ -106,14 +106,14 @@ ramulator.write_row_conflicts_channel_0_core                   0                
       ramulator.useless_activates_0_core                   0                                      # Number of useless activations. E.g, ACT -> PRE w/o RD or WR
             ramulator.read_latency_avg_0                -nan                                      # The average memory latency cycles (in memory time domain) per request for all read requests in this channel
             ramulator.read_latency_sum_0                   0                                      # The memory latency cycles (in memory time domain) sum for all read requests in this channel
-        ramulator.req_queue_length_avg_0           23.550802                                      # Average of read and write queue length per memory cycle per channel.
-        ramulator.req_queue_length_sum_0                4404                                      # Sum of read and write queue length per memory cycle per channel.
+        ramulator.req_queue_length_avg_0           21.523810                                      # Average of read and write queue length per memory cycle per channel.
+        ramulator.req_queue_length_sum_0                3164                                      # Sum of read and write queue length per memory cycle per channel.
    ramulator.read_req_queue_length_avg_0            0.000000                                      # Read queue length average per memory cycle per channel.
    ramulator.read_req_queue_length_sum_0                   0                                      # Read queue length sum per memory cycle per channel.
   ramulator.write_req_queue_length_avg_0            0.000000                                      # Write queue length average per memory cycle per channel.
   ramulator.write_req_queue_length_sum_0                   0                                      # Write queue length sum per memory cycle per channel.
                                                          0.0                                      # 
-                                                      4404.0                                      # 
+                                                      3164.0                                      # 
                                                          0.0                                      # 
                                                          0.0                                      # 
          ramulator.rc_commands_channel_0                   0                                      # Number of RC (RowClone) commands issued per channel
@@ -132,7 +132,7 @@ ramulator.write_row_conflicts_channel_0_core                   0                
         ramulator.record_write_conflicts                 0.0                                      # record write conflict for this core when it reaches request limit or to the end
                                      [0]                 0.0                                      # 
                  ramulator.dram_capacity          8589934592                                      # Number of bytes in simulated DRAM
-                   ramulator.dram_cycles                 187                                      # Number of DRAM cycles simulated
+                   ramulator.dram_cycles                 147                                      # Number of DRAM cycles simulated
              ramulator.incoming_requests                  95                                      # Number of incoming requests to DRAM
                  ramulator.read_requests                   0                                      # Number of incoming read requests to DRAM per core
                                      [0]                 0.0                                      # 
