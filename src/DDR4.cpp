@@ -628,21 +628,21 @@ void DDR4::init_timing()
     t[int(Command::PRE)].push_back({Command::ACT, 1, s.nRP});
     
     // According to the state machine additions 3 new commands are necessary
-    // ROWCLONE:   ACT tRAS -> PREv 3ns -> ACTv tRC-> RC (Back in closed state again)
-    // MAJORITY:   ACT 1.5ns -> PREj 3ns -> ACTv tRC -> MAJ (Back in closed state again)
-    // FRACTIONAL: ACT 2.5ns -> PREf tRP -> FRAC (Back in closed state again)
+    // ROWCLONE:   ACT tRAS -> PREv 3ns -> ACTv tRP-> RC (Need to manually issue a PRE after)
+    // MAJORITY:   ACT 1.5ns -> PREj 3ns -> ACTv tRP -> MAJ (Back in closed state again)
+    // FRACTIONAL: ACT 0.5ns -> PREf tRP -> FRAC (Back in closed state again)
 
     // Rowclone command timings
     t[int(Command::ACT)].push_back({Command::PREv, 1, s.nRAS});
     t[int(Command::PREv)].push_back({Command::ACTv, 1, 6}); // 3ns
-    t[int(Command::ACTv)].push_back({Command::RC, 1, s.nRP - 6}); // Check again in 32 paper how to do 32 RC
+    t[int(Command::ACTv)].push_back({Command::RC, 1, s.nRP}); // No need to additionally wait tRAS since only overwrite
 
     // MAJ command timings
     t[int(Command::ACT)].push_back({Command::PREj, 1, 3});
-    t[int(Command::PREj)].push_back({Command::ACTv, 1, 6}); // Check APA timing
-    t[int(Command::ACTv)].push_back({Command::MAJ, 1, s.nRP - 6}); // Check if tRC is the correct timing but should be 
+    t[int(Command::PREj)].push_back({Command::ACTv, 1, 6});
+    t[int(Command::ACTv)].push_back({Command::MAJ, 1, s.nRP}); // They say only wait for tRP, sicne APA is in the tRAS time window
 
     // FRAC command timings
-    t[int(Command::ACT)].push_back({Command::PREf, 1, 5});
-    t[int(Command::PREf)].push_back({Command::FRAC, 1, s.nRP}); // Check if actually need to wait tRP
+    t[int(Command::ACT)].push_back({Command::PREf, 1, 1}); // using only one cylce
+    t[int(Command::PREf)].push_back({Command::FRAC, 1, s.nRP}); // Wait for the precharge to finish
 }

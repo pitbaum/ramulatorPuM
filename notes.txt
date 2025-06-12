@@ -1,0 +1,6 @@
+---> ACT to ACT latency between commands which is unexpected and too long (tRAS)
+        --> Example: RC -> RC, will both start with ACT thus even when issuing back to back, second RC will be executed tRAS after first RCs ACT
+
+---> Memory mapping unclear, hard to test the correct PRE of opened rows and Read Write behavior with PuM
+
+---> 
